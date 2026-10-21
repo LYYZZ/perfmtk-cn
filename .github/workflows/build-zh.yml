@@ -1,0 +1,176 @@
+name: Build Chinese APK
+
+# What this does
+#   1. Checks the upstream repo (JUANIMAN/PerfMTK-Manager) for a new commit.
+#   2. If it is new, clones that exact revision into a scratch directory.
+#   3. Re-applies the Simplified-Chinese localization with tools/apply_zh.py.
+#   4. Builds a release APK signed with your own key and publishes it as a release.
+#
+# This repository intentionally contains NO upstream source code: only the workflow
+# and the tools/ directory. Upstream is cloned fresh on every run, so there is never
+# a merge conflict to resolve when the author refactors app_locales.dart.
+
+on:
+  schedule:
+    # 03:00 UTC == 11:00 Beijing time, once a day
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force a build even if this upstream commit was already built'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-zh
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/JUANIMAN/PerfMTK-Manager.git
+  UPSTREAM_API: JUANIMAN/PerfMTK-Manager
+  # Brand-new Flutter stable releases occasionally break third-party projects.
+  # If a run fails on a Dart compile error right after an upstream update, pin this
+  # to the last working version (e.g. '3.38.5') and enable `channel:` vs `flutter-version:`.
+  FLUTTER_CHANNEL: stable
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository (workflow + tools only)
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream revision
+        id: up
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh api "repos/${UPSTREAM_API}/commits/main" --jq .sha)
+          SHORT=${SHA:0:7}
+          VERSION=$(curl -fsSL "https://raw.githubusercontent.com/${UPSTREAM_API}/${SHA}/pubspec.yaml" \
+                    | awk '/^version:/ {print $2}' | tr -d '\r')
+          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT"    >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=zh-v${VERSION}-${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "Upstream: ${VERSION} @ ${SHORT}"
+
+      - name: Skip if this revision was already built
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.up.outputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "forced"; exit 0
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists - nothing to do."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New revision, will build $TAG"
+          fi
+
+      - name: Clone upstream revision
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          git clone --quiet "$UPSTREAM" src
+          cd src
+          git checkout --quiet "${{ steps.up.outputs.sha }}"
+          rm -rf .git
+          cp -r "$GITHUB_WORKSPACE/tools" ./tools
+          echo "cloned upstream ${{ steps.up.outputs.short }}"
+
+      - name: Set up JDK 21
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Flutter
+        if: steps.gate.outputs.build == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Apply Simplified-Chinese localization
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/apply_zh.py src | tee apply.log
+          # Surface untranslated keys in the run summary instead of failing the build.
+          {
+            echo '## Chinese localization'
+            echo '```'
+            cat apply.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure signing
+        if: steps.gate.outputs.build == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="$GITHUB_WORKSPACE/keystore.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          # The project reads signing config from android/local.properties
+          # (see android/app/build.gradle.kts). Flutter adds sdk.dir/flutter.sdk to
+          # this same file and keeps unknown keys, so writing it here is enough.
+          cat > src/android/local.properties <<EOF
+          storeFile=$KS
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          cat src/android/local.properties | sed 's/^storePassword=.*/storePassword=***/'
+
+      - name: Build release APK
+        if: steps.gate.outputs.build == 'true'
+        working-directory: src
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter build apk --release
+          ls -l build/app/outputs/flutter-apk/
+
+      - name: Publish release
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.up.outputs.tag }}
+          VERSION: ${{ steps.up.outputs.version }}
+          SHORT: ${{ steps.up.outputs.short }}
+        run: |
+          set -euo pipefail
+          APK="src/build/app/outputs/flutter-apk/app-release.apk"
+          OUT="PerfMTK-Manager-zh-${VERSION}-${SHORT}.apk"
+          cp "$APK" "$OUT"
+          {
+            echo "Simplified Chinese build of PerfMTK-Manager ${VERSION} (upstream ${SHORT})."
+            echo
+            echo "Localization applied by tools/apply_zh.py; see the generated zh map in"
+            echo "lib/localization/app_locales.dart for details."
+            echo
+            echo "Untranslated keys introduced by this upstream revision are listed below."
+            echo
+            echo '```'
+            python3 tools/apply_zh.py src --check-only || true
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" "$OUT" \
+            --title "中文版 ${VERSION} (${SHORT})" \
+            --notes-file notes.md
