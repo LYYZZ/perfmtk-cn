@@ -53,11 +53,17 @@ jobs:
           SHORT=${SHA:0:7}
           VERSION=$(curl -fsSL "https://raw.githubusercontent.com/${UPSTREAM_API}/${SHA}/pubspec.yaml" \
                     | awk '/^version:/ {print $2}' | tr -d '\r')
-          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
-          echo "short=$SHORT"    >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=zh-v${VERSION}-${SHORT}" >> "$GITHUB_OUTPUT"
-          echo "Upstream: ${VERSION} @ ${SHORT}"
+          # Obtainium treats the release TAG as the "available version" and compares it
+          # with the installed versionName. The APK's versionName is the part of
+          # `version:` before the "+", so the tag must be exactly that, otherwise
+          # Obtainium keeps offering the same build on every 6-hour check.
+          APPVER="${VERSION%%+*}"
+          echo "sha=$SHA"          >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT"      >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
+          echo "appver=$APPVER"    >> "$GITHUB_OUTPUT"
+          echo "tag=$APPVER"       >> "$GITHUB_OUTPUT"
+          echo "Upstream: ${VERSION} (versionName ${APPVER}) @ ${SHORT}"
 
       - name: Skip if this revision was already built
         id: gate
@@ -153,6 +159,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.up.outputs.tag }}
           VERSION: ${{ steps.up.outputs.version }}
+          APPVER: ${{ steps.up.outputs.appver }}
           SHORT: ${{ steps.up.outputs.short }}
         run: |
           set -euo pipefail
@@ -178,5 +185,5 @@ jobs:
             gh release delete "$TAG" --yes --cleanup-tag
           fi
           gh release create "$TAG" "$OUT" \
-            --title "中文版 ${VERSION} (${SHORT})" \
+            --title "中文版 ${APPVER}（上游 ${VERSION} @ ${SHORT}）" \
             --notes-file notes.md
