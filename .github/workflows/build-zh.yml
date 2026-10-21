@@ -171,6 +171,12 @@ jobs:
             python3 tools/apply_zh.py src --check-only || true
             echo '```'
           } > notes.md
+          # A forced re-run rebuilds the same upstream revision; the tag already
+          # exists then, so drop the old release first or `release create` fails.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Replacing existing release $TAG"
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
           gh release create "$TAG" "$OUT" \
             --title "中文版 ${VERSION} (${SHORT})" \
             --notes-file notes.md
