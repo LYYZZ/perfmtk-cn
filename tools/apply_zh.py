@@ -197,6 +197,22 @@ def drop_unsupported_api(repo: Path) -> str | None:
     return f"{target.relative_to(repo)}: removed scrollCacheExtent (needs a newer Flutter SDK)"
 
 
+def normalize_gradle_properties(repo: Path) -> str | None:
+    """Upstream ships android/gradle.properties pinned to the author's own JDK:
+        org.gradle.java.home=C:\\Program Files\\Android\\openjdk\\jdk-21.0.8
+    That path only exists on his Windows machine, so every build elsewhere dies with
+    "Java home supplied is invalid". Drop the line and let the runner's JDK be used."""
+    path = repo / "android/gradle.properties"
+    if not path.exists():
+        return None
+    lines = read(path).split("\n")
+    kept = [line for line in lines if not line.strip().startswith("org.gradle.java.home")]
+    if len(kept) == len(lines):
+        return None
+    write(path, "\n".join(kept))
+    return "android/gradle.properties: removed org.gradle.java.home (author's local JDK path)"
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
@@ -276,6 +292,10 @@ def main() -> int:
     compat = drop_unsupported_api(repo)
     if compat:
         print(compat)
+
+    gradle = normalize_gradle_properties(repo)
+    if gradle:
+        print(gradle)
 
     if missing:
         print(f"[note] {len(missing)} new untranslated key(s) currently show English:")
